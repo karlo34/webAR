@@ -1,299 +1,258 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
-    <title>Hand Control - Proximity & Multi-Gesture</title>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>Hand Controlled Cube (All Devices)</title>
+
+    <!-- MediaPipe -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+
+    <!-- Three.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
     <style>
-        body,
-        html {
+        html,
+        body {
             margin: 0;
             padding: 0;
             width: 100%;
             height: 100%;
             overflow: hidden;
-            background-color: #000;
+            background: black;
         }
 
         #container {
             position: relative;
-            width: 100vw;
-            height: 100vh;
+            width: 100%;
+            height: 100%;
         }
 
         video {
             display: none;
         }
 
-        #output_canvas {
-            position: absolute;
-            width: 100vw;
-            height: 100vh;
-            object-fit: contain;
-            /* Prevents the 'zoomed in' look */
-            transform: scaleX(-1);
-        }
-
-        #three_canvas {
+        canvas {
             position: absolute;
             top: 0;
             left: 0;
-            width: 100vw;
-            height: 100vh;
-            z-index: 5;
+        }
+
+        #overlay {
+            z-index: 1;
+            transform: scaleX(-1);
+        }
+
+        #three {
+            z-index: 2;
             pointer-events: none;
         }
 
         #status {
             position: absolute;
-            bottom: 30px;
+            bottom: 20px;
             left: 50%;
             transform: translateX(-50%);
-            z-index: 10;
-            font-family: sans-serif;
-            font-size: 1.5em;
             color: white;
-            text-shadow: 2px 2px 8px rgba(0, 0, 0, 0.8);
+            font-family: sans-serif;
+            font-size: 1.2em;
+            z-index: 3;
         }
     </style>
 </head>
 
 <body>
     <div id="container">
-        <video id="webcam" autoplay playsinline></video>
-        <canvas id="output_canvas"></canvas>
-        <div id="three_canvas"></div>
+        <video id="video" autoplay playsinline></video>
+        <canvas id="overlay"></canvas>
+        <canvas id="three"></canvas>
+        <div id="status">Loading…</div>
     </div>
-    <div id="status">Loading Gestures...</div>
 
     <script type="module">
-        const videoElement = document.getElementById('webcam');
-        const canvasElement = document.getElementById('output_canvas');
-        const canvasCtx = canvasElement.getContext('2d');
-        const statusDiv = document.getElementById('status');
-
-        let handsState = {
-            "Right": { loadingProgress: 0, lastZ: 0, actionTriggered: false, url: "https://www.google.com/search?q=dog+img&udm=2" },
-            "Left": { loadingProgress: 0, lastZ: 0, actionTriggered: false, url: "https://www.google.com/search?q=cat+img&udm=2" }
-        };
-
-        const virtualButton = { x: 50, y: 50, w: 200, h: 80, color: 'rgba(255, 0, 0, 0.6)' };
-        const LOAD_SPEED = 0.025;
-        let isObjectHeld = false; // Track if right hand has "captured" the cube
-        let initialHandDist = null;
-        let currentBaseScale = 1.0;
-
-        // --- THREE.JS SETUP ---
-        let scene, camera, renderer, cube;
-        function init3D() {
-            scene = new THREE.Scene();
-            camera = new THREE.PerspectiveCamera(85, window.innerWidth / window.innerHeight, 0.1, 1000);
-
-            renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
-            renderer.setPixelRatio(window.devicePixelRatio);
-            renderer.setSize(window.innerWidth, window.innerHeight);
-
-            document.getElementById('three_canvas').appendChild(renderer.domElement);
-
-            // 1. Create Geometry with segments to match your image grid
-            const geometry = new THREE.BoxGeometry(1, 1, 1, 3, 3, 3);
-
-            // 2. Create the "Half-Transparent" solid part
-            const meshMaterial = new THREE.MeshBasicMaterial({
-                color: 0x002244,
-                transparent: true,
-                opacity: 0.5,
-                side: THREE.DoubleSide
-            });
-
-            // Create the main cube object
-            cube = new THREE.Mesh(geometry, meshMaterial);
-            const edgesGeom = new THREE.EdgesGeometry(geometry, 1);
-
-            // 3. Create the Grid Lines (Wireframe) overlay
-            const wireframeGeom = new THREE.WireframeGeometry(geometry);
-            const lineMaterial = new THREE.LineBasicMaterial({
-                color: 0x000000,    // Bright blue lines
-                transparent: true,
-                opacity: 0.8
-            });
-            const lines = new THREE.LineSegments(wireframeGeom, lineMaterial);
-
-            // Add the lines as a child of the cube so they move/scale together
-            cube.add(lines);
-
-            scene.add(cube);
-
-            camera.position.z = 5;
-        }
-
-        // --- GESTURE HELPERS ---
-        function isFist(landmarks) {
-            const tips = [8, 12, 16, 20], joints = [6, 10, 14, 18];
-            return tips.every((tip, i) => landmarks[tip].y > landmarks[joints[i]].y);
-        }
-
-        function getPinchDistance(landmarks) {
-            return Math.sqrt(Math.pow(landmarks[4].x - landmarks[8].x, 2) + Math.pow(landmarks[4].y - landmarks[8].y, 2));
-        }
-
-        function drawVirtualButton() {
-            canvasCtx.save();
-            canvasCtx.scale(-1, 1);
-            canvasCtx.translate(-canvasElement.width / (window.devicePixelRatio || 1), 0);
-            canvasCtx.fillStyle = virtualButton.color;
-            canvasCtx.roundRect(virtualButton.x, virtualButton.y, virtualButton.w, virtualButton.h, 15);
-            canvasCtx.fill();
-            canvasCtx.fillStyle = "white";
-            canvasCtx.font = "bold 24px Arial";
-            canvasCtx.textAlign = "center";
-            canvasCtx.fillText("POKE ME", virtualButton.x + (virtualButton.w / 2), virtualButton.y + 48);
-            canvasCtx.restore();
-        }
-
-        // --- INTERACTION LOGIC ---
-        function handleGrabAndScale(handsDetected, rPinching, lPinching) {
-            const palm = handsDetected.Right[9];
-            const handPos = new THREE.Vector3(-(palm.x - 0.5) * 10, -(palm.y - 0.5) * 6, -palm.z * 15);
-
-            const distance = handPos.distanceTo(cube.position);
-            const grabThreshold = 1.5;
-
-            // Only act if we are already holding it or starting to hold it
-            if (isObjectHeld || distance < grabThreshold) {
-                isObjectHeld = true;
-                cube.position.lerp(handPos, 0.2);
-                cube.material.color.setHex(0xFF0000);
-
-                // --- SCALING (Only while grabbing) ---
-                if (lPinching && handsDetected.Left) {
-                    const p1 = handsDetected.Right[9];
-                    const p2 = handsDetected.Left[9];
-                    const currentDist = Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
-
-                    if (initialHandDist === null) initialHandDist = currentDist;
-                    let newScale = currentBaseScale * (currentDist / initialHandDist);
-                    newScale = Math.max(0.1, Math.min(newScale, 5.0));
-                    cube.scale.set(newScale, newScale, newScale);
-                    cube.material.color.setHex(0xFFD700);
-                    return `GRABBING & SCALING: ${(newScale * 100).toFixed(0)}%`;
-                } else {
-                    initialHandDist = null; // Reset scale anchor if left hand releases
-                    currentBaseScale = cube.scale.x;
-                    return "GRABBING";
-                }
-            }
-            return "Hand near cube (Close fist to grab)";
-        }
-
-        function handlePinch(handedness, landmarks) {
-            const state = handsState[handedness];
-            const pX = landmarks[4].x * window.innerWidth;
-            const pY = landmarks[4].y * window.innerHeight;
-
-            state.loadingProgress = Math.min(state.loadingProgress + LOAD_SPEED, 1);
-            const color = (handedness === "Right") ? "#4285F4" : "#EA4335";
-
-            canvasCtx.beginPath();
-            canvasCtx.arc(pX, pY, 45, 0, 2 * Math.PI);
-            canvasCtx.lineWidth = 5;
-            canvasCtx.strokeStyle = "rgba(255, 255, 255, 0.2)";
-            canvasCtx.stroke();
-
-            canvasCtx.beginPath();
-            canvasCtx.arc(pX, pY, 45, -Math.PI / 2, (-Math.PI / 2) + (Math.PI * 2 * state.loadingProgress));
-            canvasCtx.strokeStyle = color;
-            canvasCtx.stroke();
-
-            if (state.loadingProgress >= 1 && !state.actionTriggered) {
-                state.actionTriggered = true;
-                window.open(state.url, "_blank");
-                setTimeout(() => { state.actionTriggered = false; }, 3000);
-            }
-            return `${handedness} PINCHING`;
-        }
-
-        // --- MAIN LOOP ---
-        function onResults(results) {
-            canvasCtx.save();
-            const dpr = window.devicePixelRatio || 1;
-            canvasCtx.scale(dpr, dpr);
-            canvasCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
-            canvasCtx.drawImage(results.image, 0, 0, window.innerWidth, window.innerHeight);
-
-            let statusText = "Mode: Idle";
-            let handsDetected = { "Right": null, "Left": null };
-
-            if (results.multiHandLandmarks) {
-                drawVirtualButton();
-                results.multiHandLandmarks.forEach((landmarks, index) => {
-                    const label = results.multiHandedness[index].label;
-                    const handedness = label === "Left" ? "Right" : "Left";
-                    handsDetected[handedness] = landmarks;
-
-                    drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, { color: '#00FF00', lineWidth: 2 });
-                    drawLandmarks(canvasCtx, landmarks, { color: '#FF0000', lineWidth: 1 });
-                });
-            }
-
-            const rPinching = handsDetected.Right && getPinchDistance(handsDetected.Right) < 0.055;
-            const lPinching = handsDetected.Left && getPinchDistance(handsDetected.Left) < 0.055;
-            const rGrabbing = handsDetected.Right && isFist(handsDetected.Right);
-
-            // LOGIC TREE
-            if (rGrabbing) {
-                statusText = handleGrabAndScale(handsDetected, rPinching, lPinching);
-            } else {
-                isObjectHeld = false;
-                initialHandDist = null;
-                currentBaseScale = cube.scale.x;
-
-                cube.rotation.x += 0.01;
-                cube.rotation.y += 0.01;
-                cube.material.color.setHex(0x00ff00);
-
-                if (rPinching) statusText = handlePinch("Right", handsDetected.Right);
-                else handsState.Right.loadingProgress = 0;
-
-                if (lPinching) statusText = handlePinch("Left", handsDetected.Left);
-                else handsState.Left.loadingProgress = 0;
-            }
-
-            statusDiv.innerText = statusText;
-            renderer.render(scene, camera);
-            canvasCtx.restore();
-        }
-
-        // --- INIT ---
-        const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
-        hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.8, minTrackingConfidence: 0.8 });
-        hands.onResults(onResults);
-
-        async function start() {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1920, height: 1080 } });
-            videoElement.srcObject = stream;
-            videoElement.onloadedmetadata = () => {
-                videoElement.play();
-                const proc = async () => { await hands.send({ image: videoElement }); requestAnimationFrame(proc); };
-                proc();
-            };
-        }
+        /* ------------------------------------------------ */
+        /* BASIC SETUP                                      */
+        /* ------------------------------------------------ */
+        const video = document.getElementById("video");
+        const overlay = document.getElementById("overlay");
+        const ctx = overlay.getContext("2d");
+        const status = document.getElementById("status");
 
         function resize() {
-            const dpr = window.devicePixelRatio || 1;
-            canvasElement.width = window.innerWidth * dpr;
-            canvasElement.height = window.innerHeight * dpr;
+            overlay.width = window.innerWidth;
+            overlay.height = window.innerHeight;
+
             renderer.setSize(window.innerWidth, window.innerHeight);
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
         }
 
-        init3D();
-        resize();
-        window.addEventListener('resize', resize);
+        window.addEventListener("resize", resize);
+
+        /* ------------------------------------------------ */
+        /* THREE.JS                                        */
+        /* ------------------------------------------------ */
+        const renderer = new THREE.WebGLRenderer({
+            canvas: document.getElementById("three"),
+            alpha: true,
+            antialias: true
+        });
+
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+        const scene = new THREE.Scene();
+
+        const camera = new THREE.PerspectiveCamera(
+            60,
+            window.innerWidth / window.innerHeight,
+            0.1,
+            100
+        );
+        camera.position.z = 4;
+
+        const geometry = new THREE.BoxGeometry(1, 1, 1);
+        const material = new THREE.MeshStandardMaterial({
+            color: 0x00ff88,
+            roughness: 0.3,
+            metalness: 0.1
+        });
+
+        const cube = new THREE.Mesh(geometry, material);
+        scene.add(cube);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+
+        const light = new THREE.DirectionalLight(0xffffff, 0.6);
+        light.position.set(1, 2, 3);
+        scene.add(light);
+
+        /* ------------------------------------------------ */
+        /* MEDIAPIPE HANDS                                 */
+        /* ------------------------------------------------ */
+        const hands = new Hands({
+            locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+
+        hands.onResults(onResults);
+
+        /* ------------------------------------------------ */
+        /* GESTURES                                       */
+        /* ------------------------------------------------ */
+        let holding = false;
+        let baseScale = 1;
+        let startDist = null;
+
+        function pinchDistance(lm) {
+            const dx = lm[4].x - lm[8].x;
+            const dy = lm[4].y - lm[8].y;
+            return Math.sqrt(dx * dx + dy * dy);
+        }
+
+        function isFist(lm) {
+            return lm[8].y > lm[6].y &&
+                lm[12].y > lm[10].y &&
+                lm[16].y > lm[14].y &&
+                lm[20].y > lm[18].y;
+        }
+
+        /* ------------------------------------------------ */
+        /* MAIN LOOP                                      */
+        /* ------------------------------------------------ */
+        function onResults(results) {
+            ctx.clearRect(0, 0, overlay.width, overlay.height);
+            ctx.drawImage(results.image, 0, 0, overlay.width, overlay.height);
+
+            let right = null;
+            let left = null;
+
+            ctx.save();
+            ctx.translate(overlay.width, 0);
+            ctx.scale(-1, 1);
+
+            ctx.drawImage(results.image, 0, 0, overlay.width, overlay.height);
+
+            if (results.multiHandLandmarks) {
+                results.multiHandLandmarks.forEach((lm, i) => {
+                    const label = results.multiHandedness[i].label;
+                    if (label === "Right") left = lm;
+                    else right = lm;
+
+                    drawConnectors(ctx, lm, HAND_CONNECTIONS, { color: "#00ff00" });
+                    drawLandmarks(ctx, lm, { color: "#ff0000" });
+                });
+            }
+            ctx.restore();
+
+            if (right) {
+                const fist = isFist(right);
+
+                const x = (right[9].x - 0.5) * 4;
+                const y = -(right[9].y - 0.5) * 3;
+                const z = THREE.MathUtils.clamp(-right[9].z * 5, -3, -1);
+
+                if (fist) {
+                    holding = true;
+                    cube.position.lerp(new THREE.Vector3(x, y, z), 0.3);
+                    cube.material.color.setHex(0xff4444);
+
+                    if (left && pinchDistance(left) < 0.05) {
+                        const d = Math.hypot(
+                            right[9].x - left[9].x,
+                            right[9].y - left[9].y
+                        );
+
+                        if (!startDist) startDist = d;
+                        const s = THREE.MathUtils.clamp(baseScale * (d / startDist), 0.3, 3);
+                        cube.scale.setScalar(s);
+                        status.innerText = "Grab + Scale";
+                    } else {
+                        startDist = null;
+                        baseScale = cube.scale.x;
+                        status.innerText = "Grab";
+                    }
+                } else {
+                    holding = false;
+                }
+            }
+
+            if (!holding) {
+                cube.rotation.x += 0.01;
+                cube.rotation.y += 0.015;
+                cube.material.color.setHex(0x00ff88);
+                status.innerText = "Idle";
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        /* ------------------------------------------------ */
+        /* CAMERA START                                   */
+        /* ------------------------------------------------ */
+        async function start() {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: "user" }
+            });
+            video.srcObject = stream;
+            await video.play();
+
+            resize();
+
+            async function loop() {
+                await hands.send({ image: video });
+                requestAnimationFrame(loop);
+            }
+            loop();
+        }
+
         start();
     </script>
 </body>
